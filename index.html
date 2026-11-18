@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>구슬던지기</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px;
+    font-family: system-ui, "Malgun Gothic", sans-serif;
+    background: #1e2230; color: #eee;
+    display: flex; flex-direction: column; align-items: center; gap: 12px;
+  }
+  h1 { margin: 4px 0; }
+  .clock {
+    background: #000; border: 3px solid #444; border-radius: 10px;
+    padding: 10px 16px; font-family: "Courier New", monospace; color: #3f3;
+    text-shadow: 0 0 6px #3f3; width: 100%; max-width: 480px;
+  }
+  .clock .now { font-size: 2rem; text-align: center; letter-spacing: 3px; }
+  .clock .row { display: flex; justify-content: space-between; font-size: 0.95rem; }
+  .clock button { margin-top: 6px; width: 100%; }
+  .info { display: flex; gap: 16px; font-size: 1.05rem; flex-wrap: wrap; justify-content: center; }
+  canvas {
+    background: linear-gradient(#9cd4ff, #e8f6ff); border-radius: 8px;
+    width: 100%; max-width: 480px; cursor: pointer; touch-action: manipulation;
+  }
+  .controls { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+  input { padding: 8px; border-radius: 6px; border: none; width: 140px; }
+  button {
+    padding: 8px 20px; font-size: 1rem; border: none; border-radius: 6px;
+    cursor: pointer; font-weight: bold;
+  }
+  #startBtn { background: #2ecc71; color: #fff; }
+  #endBtn { background: #e74c3c; color: #fff; }
+  #refreshBtn { background: #333; color: #3f3; font-family: inherit; }
+  button:disabled { opacity: 0.4; cursor: default; }
+  #msg { min-height: 1.4em; font-weight: bold; color: #ffd54f; }
+  .rank { width: 100%; max-width: 480px; background: #2a3042; border-radius: 8px; padding: 8px 16px; }
+  .rank h3 { margin: 4px 0; }
+  .rank ol { margin: 4px 0; padding-left: 20px; }
+</style>
+</head>
+<body>
+  <h1>구슬던지기</h1>
+
+  <div class="clock">
+    <div class="now" id="clockNow">00:00:00</div>
+    <div class="row"><span>시작</span><span id="clockStart">--:--:--</span></div>
+    <div class="row"><span>끝</span><span id="clockEnd">--:--:--</span></div>
+    <div class="row"><span>기록</span><span id="clockElapsed">00:00.00</span></div>
+    <button id="refreshBtn">↻ 새로고침</button>
+  </div>
+
+  <div class="info">
+    <span>단계: <b id="stage">1</b> / 3</span>
+    <span>성공: <b id="score">0</b> / 15</span>
+    <span>던진 횟수: <b id="throws">0</b></span>
+  </div>
+
+  <canvas id="game" width="480" height="320"></canvas>
+  <div id="msg">이름을 입력하고 [시작]을 누르세요. 화면 클릭 또는 스페이스바로 던집니다.</div>
+
+  <div class="controls">
+    <input id="name" placeholder="이름" maxlength="10">
+    <button id="startBtn">시작</button>
+    <button id="endBtn" disabled>끝</button>
+  </div>
+
+  <div class="rank">
+    <h3>🏆 빠른 기록 TOP 5</h3>
+    <ol id="rankList"></ol>
+  </div>
+
+<script>
+  // ===== 설정 =====
+  const PER_STAGE = 5, MAX_STAGE = 3, GOAL = PER_STAGE * MAX_STAGE;
+  const STORE_KEY = 'marbleThrowRecords';
+  const W = 480, H = 320, GROUND = 300, R = 7, G = 0.25;
+  const START = { x: 40, y: 270 };
+  const ANGLE = 55 * Math.PI / 180;
+
+  const $ = id => document.getElementById(id);
+  const cv = $('game'), ctx = cv.getContext('2d');
+
+  // ===== 상태 =====
+  let playing = false, score = 0, throws = 0;
+  let startTime = 0, endTime = 0;
+  let power = 0, powerDir = 1;
+  let ball = null;          // 날아가는 구슬
+  let cyl = { x: 300, w: 44, h: 70, vx: 0 };
+  let flash = null;         // 성공/실패 표시
+
+  const stage = () => Math.min(MAX_STAGE, Math.floor(score / PER_STAGE) + 1);
+  const fmtClock = d => d ? d.toTimeString().slice(0, 8) : '--:--:--';
+  const fmtElapsed = ms => {
+    const m = Math.floor(ms / 60000), s = Math.floor(ms / 1000) % 60, c = Math.floor(ms / 10) % 100;
+    return `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}.${String(c).padStart(2,'0')}`;
+  };
+
+  // ===== 원통 배치 (단계별 난이도) =====
+  function placeCylinder() {
+    const st = stage();
+    cyl.w = [0, 48, 42, 36][st];
+    cyl.x = 180 + Math.random() * 260;
+    cyl.vx = st === 1 ? 0 : (st === 2 ? 1.2 : 2.2) * (Math.random() < 0.5 ? -1 : 1);
+  }
+
+  // ===== 던지기 =====
+  function throwBall() {
+    if (!playing || ball) return;
+    const v = 5 + power * 7;
+    ball = { x: START.x, y: START.y, vx: v * Math.cos(ANGLE), vy: -v * Math.sin(ANGLE) };
+    throws++;
+    updateInfo();
+  }
+
+  function finishThrow(ok) {
+    ball = null;
+    flash = { ok, t: 40 };
+    if (ok) {
+      const before = stage();
+      score++;
+      if (score >= GOAL) { endGame(true); return; }
+      if (stage() !== before) $('msg').textContent = `${stage()}단계 시작! 원통이 움직입니다.`;
+    }
+    updateInfo();
+    placeCylinder();
+  }
+
+  // ===== 게임 시작/끝 =====
+  function startGame() {
+    score = 0; throws = 0; ball = null; flash = null;
+    playing = true;
+    startTime = Date.now(); endTime = 0;
+    $('clockStart').textContent = fmtClock(new Date(startTime));
+    $('clockEnd').textContent = '--:--:--';
+    $('startBtn').disabled = true; $('endBtn').disabled = false; $('name').disabled = true;
+    $('msg').textContent = '1단계: 원통에 구슬 5개를 넣으세요!';
+    placeCylinder();
+    updateInfo();
+  }
+
+  function endGame(cleared) {
+    if (!playing) return;
+    playing = false; ball = null;
+    endTime = Date.now();
+    $('clockEnd').textContent = fmtClock(new Date(endTime));
+    $('clockElapsed').textContent = fmtElapsed(endTime - startTime);
+    $('startBtn').disabled = false; $('endBtn').disabled = true; $('name').disabled = false;
+    if (cleared) {
+      const name = $('name').value.trim() || '익명';
+      saveRecord({ name, time: endTime - startTime, throws });
+      $('msg').textContent = `🎉 클리어! ${name}: ${fmtElapsed(endTime - startTime)} (${throws}번 던짐)`;
+    } else {
+      $('msg').textContent = `게임 종료 (${score}/${GOAL} 성공) - 15개를 모두 넣어야 기록됩니다.`;
+    }
+    updateInfo();
+  }
+
+  // ===== localStorage 기록 =====
+  function loadRecords() {
+    try { return JSON.parse(localStorage.getItem(STORE_KEY)) || []; } catch { return []; }
+  }
+  function saveRecord(rec) {
+    const list = loadRecords();
+    list.push(rec);
+    list.sort((a, b) => a.time - b.time);
+    try { localStorage.setItem(STORE_KEY, JSON.stringify(list.slice(0, 5))); } catch {}
+    renderRank();
+  }
+  function renderRank() {
+    const list = loadRecords();
+    $('rankList').innerHTML = list.length
+      ? list.map(r => `<li>${r.name.replace(/[<>&]/g, '')} — ${fmtElapsed(r.time)} (${r.throws}번)</li>`).join('')
+      : '<li>아직 기록이 없습니다</li>';
+  }
+
+  function updateInfo() {
+    $('stage').textContent = stage();
+    $('score').textContent = score;
+    $('throws').textContent = throws;
+  }
+
+  // ===== 루프 =====
+  let last = performance.now();
+  function loop(now) {
+    const k = Math.min(3, (now - last) / 16.67); last = now;
+
+    // 시계
+    $('clockNow').textContent = fmtClock(new Date());
+    if (playing) $('clockElapsed').textContent = fmtElapsed(Date.now() - startTime);
+
+    if (playing) {
+      // 파워 게이지 왕복
+      power += 0.018 * powerDir * k;
+      if (power >= 1) { power = 1; powerDir = -1; }
+      if (power <= 0) { power = 0; powerDir = 1; }
+
+      // 원통 이동
+      cyl.x += cyl.vx * k;
+      if (cyl.x < 160 || cyl.x > W - 30) { cyl.vx *= -1; cyl.x = Math.max(160, Math.min(W - 30, cyl.x)); }
+
+      // 구슬 이동
+      if (ball) {
+        const prevY = ball.y;
+        ball.vy += G * k; ball.x += ball.vx * k; ball.y += ball.vy * k;
+        const top = GROUND - cyl.h;
+        if (ball.vy > 0 && prevY < top && ball.y >= top) {
+          if (Math.abs(ball.x - cyl.x) < cyl.w / 2 - R + 2) { finishThrow(true); }
+        }
+        if (ball && (ball.y > GROUND - R || ball.x > W + 20)) finishThrow(false);
+      }
+    }
+    if (flash && --flash.t <= 0) flash = null;
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+    // 땅
+    ctx.fillStyle = '#6b8e23'; ctx.fillRect(0, GROUND, W, H - GROUND);
+
+    // 원통
+    const top = GROUND - cyl.h, left = cyl.x - cyl.w / 2;
+    ctx.fillStyle = '#8e44ad'; ctx.fillRect(left, top, cyl.w, cyl.h);
+    ctx.fillStyle = '#5e2d79';
+    ctx.beginPath(); ctx.ellipse(cyl.x, top, cyl.w / 2, 6, 0, 0, Math.PI * 2); ctx.fill();
+
+    // 던지는 위치 & 파워 게이지
+    ctx.fillStyle = '#555'; ctx.fillRect(START.x - 12, START.y + R, 24, GROUND - START.y - R);
+    ctx.strokeStyle = '#333'; ctx.strokeRect(10, 20, 14, 120);
+    ctx.fillStyle = `hsl(${120 - power * 120},80%,50%)`;
+    ctx.fillRect(11, 20 + 120 * (1 - power), 12, 120 * power);
+    ctx.fillStyle = '#333'; ctx.font = '11px sans-serif'; ctx.fillText('힘', 10, 155);
+
+    // 구슬
+    const b = ball || (playing ? START : null);
+    if (b) {
+      ctx.fillStyle = '#e67e22';
+      ctx.beginPath(); ctx.arc(b.x, b.y, R, 0, Math.PI * 2); ctx.fill();
+    }
+
+    // 결과 표시
+    if (flash) {
+      ctx.font = 'bold 32px sans-serif'; ctx.textAlign = 'center';
+      ctx.fillStyle = flash.ok ? '#27ae60' : '#c0392b';
+      ctx.fillText(flash.ok ? '골인!' : '실패', W / 2, 60);
+      ctx.textAlign = 'left';
+    }
+    if (!playing) {
+      ctx.fillStyle = 'rgba(0,0,0,.35)'; ctx.fillRect(0, 0, W, H);
+      ctx.fillStyle = '#fff'; ctx.font = 'bold 22px sans-serif'; ctx.textAlign = 'center';
+      ctx.fillText('[시작] 버튼을 누르세요', W / 2, H / 2);
+      ctx.textAlign = 'left';
+    }
+  }
+
+  // ===== 이벤트 =====
+  $('startBtn').onclick = startGame;
+  $('endBtn').onclick = () => endGame(false);
+  $('refreshBtn').onclick = () => {
+    if (playing) return;
+    startTime = endTime = 0;
+    $('clockStart').textContent = '--:--:--';
+    $('clockEnd').textContent = '--:--:--';
+    $('clockElapsed').textContent = '00:00.00';
+  };
+  cv.addEventListener('pointerdown', throwBall);
+  document.addEventListener('keydown', e => {
+    if (e.code === 'Space' && playing) { e.preventDefault(); throwBall(); }
+  });
+
+  renderRank();
+  requestAnimationFrame(loop);
+</script>
+</body>
+</html>
